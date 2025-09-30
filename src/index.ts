@@ -32,7 +32,7 @@ export default {
 		// 各宛先にメールを転送します
 		forwardEmails(message, recipients);
 	},
-};
+} satisfies ExportedHandler<Env>;
 
 const forwardEmails = async (message: ForwardableEmailMessage, addresses: string[]) => {
 	for (const address of addresses) {
