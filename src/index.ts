@@ -26,11 +26,11 @@ export default {
 		const recipients = parseEnv(env.RECIPIENTS);
 
 		const discordWehooks = parseEnv(env.DISCORD_WEBHOOKS);
-		// discordに転送
-		sendDiscordNotification(message, discordWehooks);
-
-		// 各宛先にメールを転送します
-		forwardEmails(message, recipients);
+		
+		await Promise.allSettled([
+			sendDiscordNotification(message, discordWehooks),
+			forwardEmails(message, recipients),
+		]);
 	},
 } satisfies ExportedHandler<Env>;
 
