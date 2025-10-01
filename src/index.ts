@@ -24,13 +24,14 @@ export default {
 		// 転送したいメールアドレスをすべて記載します
 		// これらのアドレスは事前にCloudflareで認証済みである必要があります
 		const recipients = parseEnv(env.RECIPIENTS);
+		console.log({ 'Recipients:': recipients });
 
 		const discordWehooks = parseEnv(env.DISCORD_WEBHOOKS);
-		
-		await Promise.allSettled([
-			sendDiscordNotification(message, discordWehooks),
-			forwardEmails(message, recipients),
-		]);
+		console.log({ 'Discord Webhooks': discordWehooks });
+
+		await Promise.allSettled([sendDiscordNotification(message, discordWehooks), forwardEmails(message, recipients)]).catch((err) => {
+			console.error({ 'Error in processing email:': err });
+		});
 	},
 } satisfies ExportedHandler<Env>;
 
@@ -99,7 +100,7 @@ const sendDiscordNotification = async (message: ForwardableEmailMessage, webhook
 		if (!response.ok) {
 			console.error(`Failed to send Discord notification to ${webhookUrl}: ${response.status} ${response.statusText}`);
 			const errorText = await response.text();
-			console.error(`Discord API response: ${errorText}`);
+			console.error({ 'Discord API response': errorText });
 		}
 	}
 };
