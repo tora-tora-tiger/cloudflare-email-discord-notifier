@@ -29,16 +29,24 @@ export default {
 		const discordWehooks = parseEnv(env.DISCORD_WEBHOOKS);
 		console.log({ 'Discord Webhooks': discordWehooks });
 
-		await Promise.allSettled([sendDiscordNotification(message, discordWehooks), forwardEmails(message, recipients)]).catch((err) => {
+		await Promise.allSettled([
+			sendDiscordNotification(message, discordWehooks),
+			forwardEmails(message, recipients),
+		]).catch((err) => {
 			console.error({ 'Error in processing email:': err });
 		});
 	},
 } satisfies ExportedHandler<Env>;
 
 const forwardEmails = async (message: ForwardableEmailMessage, addresses: string[]) => {
-	for (const address of addresses) {
-		message.forward(address);
-	}
+	for(const address of addresses) {
+		try {
+			await message.forward(address);
+			console.log(`Email forwarded to: ${address}`);
+		} catch (error) {
+			console.error(`Failed to forward email to ${address}:`, error);
+		}
+	};
 };
 
 // DiscordのWebhookに送信するデータ型を定義
@@ -98,7 +106,9 @@ const sendDiscordNotification = async (message: ForwardableEmailMessage, webhook
 		});
 
 		if (!response.ok) {
-			console.error(`Failed to send Discord notification to ${webhookUrl}: ${response.status} ${response.statusText}`);
+			console.error(
+				`Failed to send Discord notification to ${webhookUrl}: ${response.status} ${response.statusText}`
+			);
 			const errorText = await response.text();
 			console.error({ 'Discord API response': errorText });
 		}
