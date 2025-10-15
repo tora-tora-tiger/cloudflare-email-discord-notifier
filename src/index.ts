@@ -39,14 +39,16 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 const forwardEmails = async (message: ForwardableEmailMessage, addresses: string[]) => {
-	for (const address of addresses) {
-		try {
-			await message.forward(address);
-			console.log(`Email forwarded to: ${address}`);
-		} catch (error) {
-			console.error(`Failed to forward email to ${address}:`, error);
-		}
-	}
+	await Promise.allSettled(
+		addresses.map(async (address) => {
+			try {
+				await message.forward(address);
+				console.log(`Email forwarded to: ${address}`);
+			} catch (error) {
+				console.error(`Failed to forward email to ${address}:`, error);
+			}
+		})
+	);
 };
 
 // DiscordのWebhookに送信するデータ型を定義
