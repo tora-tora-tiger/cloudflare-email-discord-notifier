@@ -9,6 +9,7 @@ declare namespace Cloudflare {
 		RECIPIENTS: string;
 		DISCORD_WEBHOOKS: string;
 		EMAIL: SendEmail;
+		AI: Ai;
 	}
 }
 interface Env extends Cloudflare.Env {}

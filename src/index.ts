@@ -26,15 +26,15 @@ export default {
 		const recipients = parseEnv(env.RECIPIENTS);
 		console.log({ 'Recipients:': recipients });
 
-		const discordWehooks = parseEnv(env.DISCORD_WEBHOOKS);
-		console.log({ 'Discord Webhooks': discordWehooks });
+	const discordWebhooks = parseEnv(env.DISCORD_WEBHOOKS);
+	console.log({ 'Discord Webhooks': discordWebhooks });
 
-		await Promise.allSettled([
-			sendDiscordNotification(message, discordWehooks),
-			forwardEmails(message, recipients),
-		]).catch((err) => {
-			console.error({ 'Error in processing email:': err });
-		});
+	await Promise.allSettled([
+		sendDiscordNotification(message, discordWebhooks, env),
+		forwardEmails(message, recipients),
+	]).catch((err) => {
+		console.error({ 'Error in processing email:': err });
+	});
 	},
 } satisfies ExportedHandler<Env>;
 
@@ -51,68 +51,71 @@ const forwardEmails = async (message: ForwardableEmailMessage, addresses: string
 	);
 };
 
-// DiscordのWebhookに送信するデータ型を定義
-interface DiscordEmbed {
-	title: string;
-	fields: { name: string; value: string; inline?: boolean }[];
-	description?: string;
-	color: number;
-}
+
+const DISCORD_MESSAGE_LIMIT = 2000;
+
+type ToMarkdownResult = {
+	name: string;
+	mimetype: string;
+	tokens: number;
+	data: string;
+};
 
 /**
- * メール内容をパースし、DiscordのWebhookに通知を送信する関数
- * @param message - ForwardableEmailMessage オブジェクト
- * @param webhookUrl - DiscordのWebhook URL
+ * メール内容をMarkdownに変換してDiscord Webhookへ投稿する
  */
-const sendDiscordNotification = async (message: ForwardableEmailMessage, webhookUrls: string[]) => {
-	const webhookUrl =
-		'https://discord.com/api/webhooks/1422571662376702052/YFYGB5QXVZFZbGr4ZKFZmdCqeDh3uOHkGTjoOXTPtn4LfYGvjYX5eBKIucL8Dx1ac63k';
+const sendDiscordNotification = async (
+	message: ForwardableEmailMessage,
+	webhookUrls: string[],
+	env: Env
+): Promise<void> => {
+	if (webhookUrls.length === 0) {
+		console.warn('Discord webhook URLが設定されていません');
+		return;
+	}
 
 	const parser = new PostalMime.default();
 	const rawEmail = new Response(message.raw);
 	const email = await parser.parse(await rawEmail.arrayBuffer());
 
 	// 1. メールのメタデータを取得
-	const from = email.from;
+	const from = formatSingleAddress(email.from);
 	const to = formatAddresses(email.to);
 	const cc = formatAddresses(email.cc);
 	const bcc = formatAddresses(email.bcc);
 	const subject = message.headers.get('subject');
-	const body = formatBody(email);
+	const markdownBody = await convertEmailToMarkdown(email, env);
+	const headerLines = [
+		`件名: ${subject || 'No Subject'}`,
+		`From: ${from}`,
+		`To: ${to}`,
+		`CC: ${cc}`,
+		`BCC: ${bcc}`,
+	];
 
-	// Discord Embedsを使って見やすいメッセージを作成
-	const embed: DiscordEmbed = {
-		title: subject || 'No Subject', // 件名がない場合のフォールバック
-		fields: [
-			{ name: 'From', value: `${from.name} ${from.address}` || 'N/A', inline: true },
-			{ name: 'To', value: to, inline: true },
-			{ name: 'CC', value: cc, inline: true },
-			{ name: 'BCC', value: bcc, inline: true },
-		],
-		description: body,
-		color: 3447003, // Blue color
-	};
-
-	const discordPayload = {
-		embeds: [embed],
-	};
+	const fullMessage = `${headerLines.join('\n')}\n\n${markdownBody}`.trim();
+	const chunks = chunkForDiscord(fullMessage, DISCORD_MESSAGE_LIMIT);
 
 	for (const webhookUrl of webhookUrls) {
-		// fetchリクエストを送信
-		const response = await fetch(webhookUrl, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify(discordPayload),
-		});
+		for (const chunk of chunks) {
+			if (!chunk) {
+				continue;
+			}
+			const response = await fetch(webhookUrl, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({ content: chunk }),
+			});
 
-		if (!response.ok) {
-			console.error(
-				`Failed to send Discord notification to ${webhookUrl}: ${response.status} ${response.statusText}`
-			);
-			const errorText = await response.text();
-			console.error({ 'Discord API response': errorText });
+			if (!response.ok) {
+				console.error(
+					`Failed to send Discord notification to ${webhookUrl}: ${response.status} ${response.statusText}`
+				);
+				const errorText = await response.text();
+				console.error({ 'Discord API response': errorText });
+			}
 		}
 	}
 };
@@ -124,10 +127,55 @@ const formatAddresses = (addresses: PostalMime.Address[] | undefined): string =>
 	return addresses.map((addr) => `${addr.name} <${addr.address}>`).join(', ');
 };
 
-const formatBody = (email: PostalMime.Email): string => {
-	let body = email.text || email.html || '(本文なし)';
-	if (body.length > 3000) {
-		body = body.substring(0, 3000) + '... ';
+const formatSingleAddress = (address: PostalMime.Address | undefined): string => {
+	if (!address) {
+		return 'N/A';
 	}
-	return body;
+	const displayName = address.name ? `${address.name} ` : '';
+	return `${displayName}<${address.address}>`;
+};
+
+const convertEmailToMarkdown = async (email: PostalMime.Email, env: Env): Promise<string> => {
+	const html = email.html;
+	if (html && env.AI?.toMarkdown) {
+		try {
+			const results = (await env.AI.toMarkdown([
+				{
+					name: 'email.html',
+					blob: new Blob([html], { type: 'text/html' }),
+				},
+			])) as ToMarkdownResult[];
+			const markdown = results[0]?.data?.trim();
+			if (markdown) {
+				return markdown;
+			}
+		} catch (error) {
+			console.error('HTMLをMarkdownへ変換中にエラーが発生しました', error);
+		}
+	}
+	if (email.text) {
+		return email.text;
+	}
+	return '(本文なし)';
+};
+
+const chunkForDiscord = (content: string, limit: number): string[] => {
+	const chunks: string[] = [];
+	let remaining = content;
+
+	while (remaining.length > limit) {
+		let splitIndex = remaining.lastIndexOf('\n', limit);
+		if (splitIndex <= 0) {
+			splitIndex = limit;
+		}
+		const chunk = remaining.slice(0, splitIndex).trimEnd();
+		chunks.push(chunk);
+		remaining = remaining.slice(splitIndex).trimStart();
+	}
+
+	if (remaining.length > 0) {
+		chunks.push(remaining);
+	}
+
+	return chunks;
 };

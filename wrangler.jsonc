@@ -10,6 +10,9 @@
 	"observability": {
 		"enabled": true
 	},
+	"ai": {
+		"binding": "AI"
+	},
 	"send_email": [
 		{
 			"name": "EMAIL"
