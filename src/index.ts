@@ -26,15 +26,15 @@ export default {
 		const recipients = parseEnv(env.RECIPIENTS);
 		console.log({ 'Recipients:': recipients });
 
-	const discordWebhooks = parseEnv(env.DISCORD_WEBHOOKS);
-	console.log({ 'Discord Webhooks': discordWebhooks });
+		const discordWebhooks = parseEnv(env.DISCORD_WEBHOOKS);
+		console.log({ 'Discord Webhooks': discordWebhooks });
 
-	await Promise.allSettled([
-		sendDiscordNotification(message, discordWebhooks, env),
-		forwardEmails(message, recipients),
-	]).catch((err) => {
-		console.error({ 'Error in processing email:': err });
-	});
+		await Promise.allSettled([
+			sendDiscordNotification(message, discordWebhooks, env),
+			forwardEmails(message, recipients),
+		]).catch((err) => {
+			console.error({ 'Error in processing email:': err });
+		});
 	},
 } satisfies ExportedHandler<Env>;
 
@@ -62,18 +62,15 @@ type ToMarkdownResult = {
 };
 
 /**
- * メール内容をMarkdownに変換してDiscord Webhookへ投稿する
+ * メール内容をパースし、DiscordのWebhookに通知を送信する関数
+ * @param message - ForwardableEmailMessage オブジェクト
+ * @param webhookUrl - DiscordのWebhook URL
  */
 const sendDiscordNotification = async (
 	message: ForwardableEmailMessage,
 	webhookUrls: string[],
 	env: Env
 ): Promise<void> => {
-	if (webhookUrls.length === 0) {
-		console.warn('Discord webhook URLが設定されていません');
-		return;
-	}
-
 	const parser = new PostalMime.default();
 	const rawEmail = new Response(message.raw);
 	const email = await parser.parse(await rawEmail.arrayBuffer());
@@ -84,7 +81,7 @@ const sendDiscordNotification = async (
 	const cc = formatAddresses(email.cc);
 	const bcc = formatAddresses(email.bcc);
 	const subject = message.headers.get('subject');
-	const markdownBody = await convertEmailToMarkdown(email, env);
+	const markdownBody = await convertEmailToMarkdown(email, env.AI);
 	const headerLines = [
 		`件名: ${subject || 'No Subject'}`,
 		`From: ${from}`,
@@ -135,11 +132,11 @@ const formatSingleAddress = (address: PostalMime.Address | undefined): string =>
 	return `${displayName}<${address.address}>`;
 };
 
-const convertEmailToMarkdown = async (email: PostalMime.Email, env: Env): Promise<string> => {
+const convertEmailToMarkdown = async (email: PostalMime.Email, ai: Env['AI']): Promise<string> => {
 	const html = email.html;
-	if (html && env.AI?.toMarkdown) {
+	if (html && ai?.toMarkdown) {
 		try {
-			const results = (await env.AI.toMarkdown([
+			const results = (await ai.toMarkdown([
 				{
 					name: 'email.html',
 					blob: new Blob([html], { type: 'text/html' }),
@@ -150,7 +147,7 @@ const convertEmailToMarkdown = async (email: PostalMime.Email, env: Env): Promis
 				return markdown;
 			}
 		} catch (error) {
-			console.error('HTMLをMarkdownへ変換中にエラーが発生しました', error);
+			return email.html || email.text || '(本文なし)';
 		}
 	}
 	if (email.text) {
