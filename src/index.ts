@@ -147,6 +147,7 @@ const convertEmailToMarkdown = async (email: PostalMime.Email, ai: Env['AI']): P
 				return markdown;
 			}
 		} catch (error) {
+			console.error('AI toMarkdown conversion failed:', error);
 			return email.html || email.text || '(本文なし)';
 		}
 	}
