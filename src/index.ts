@@ -132,6 +132,56 @@ const formatSingleAddress = (address: PostalMime.Address | undefined): string =>
 	return `${displayName}<${address.address}>`;
 };
 
+/**
+ * Markdownの書式問題を修正する
+ */
+const fixMarkdownFormatting = (markdown: string): string => {
+	let fixed = markdown;
+
+	// 1. エスケープされた括弧を修正（最初に処理）
+	fixed = fixed.replace(/\\\[/g, '[');
+	fixed = fixed.replace(/\\\]/g, ']');
+	// 連続する括弧を修正（エスケープ解除後に発生する[[や]]を修正）
+	fixed = fixed.replace(/\[\[/g, '[');
+	fixed = fixed.replace(/\]\]/g, ']');
+
+	// 2. 連続する閉じ括弧を修正
+	fixed = fixed.replace(/(\])\](\()/g, ']$2');
+	fixed = fixed.replace(/(\])\)\](\()/g, ']$2');
+
+	// 3. 画像リンクをテキストリンクに変換（[![alt](img)](link) → [alt](link)）
+	fixed = fixed.replace(/\[!\[([^\]]*)\]\([^\)]+\)\]\(([^\)]+)\)/g, '[$1]($2)');
+
+	// 4. 画像を削除してURLのみを残す（![alt](url) → url）
+	// 画像URLを特別なマーカーで囲んで、後でチャンク分割できるようにする
+	fixed = fixed.replace(/!\[[^\]]*\]\(([^)]+)\)/g, '\n::IMAGE_URL::$1::/IMAGE_URL::\n');
+
+	// 4. 連続するリンク・画像の間にスペースを挿入
+	// ](url)の直後に[や!が来ている場合にスペースを挿入
+	fixed = fixed.replace(/(\]\([^)]+\))([![])/g, '$1 $2');
+
+	// 5. リンク・画像の後にテキストがくっついているのを修正
+	// ](url)の直後に非ASCII文字が来ている場合にスペースを挿入
+	fixed = fixed.replace(/(\]\([^)]+\))([^\x00-\x7F])/g, '$1 $2');
+
+	// 6. テーブル形式のパイプを削除（すべてのテーブル形式を解除）
+	// 行頭のパイプを削除
+	fixed = fixed.replace(/^\|[\s]*/gm, '');
+	// 行末のパイプとスペースを削除
+	fixed = fixed.replace(/[\s]*\|$/gm, '');
+	// 区切り線を削除（3文字以上のダッシュのみの行）
+	fixed = fixed.replace(/^[\s]*[\-—]{3,}[\s]*$/gm, '');
+
+	// 7. 空行を削除（空白文字や特殊文字のみの行）
+	// ͏ (U+034F) と ­ (U+00AD) とスペースのみで構成される行を削除
+	fixed = fixed.replace(/^[\s\u034F\u00AD]*$/gm, '');
+
+	// 8. HTMLタグを削除（DOCTYPE宣言など）
+	fixed = fixed.replace(/<[^>]+>/g, '');
+
+	return fixed.trim();
+};
+
 const convertEmailToMarkdown = async (email: PostalMime.Email, ai: Env['AI']): Promise<string> => {
 	const html = email.html;
 	if (html && ai?.toMarkdown) {
@@ -144,7 +194,7 @@ const convertEmailToMarkdown = async (email: PostalMime.Email, ai: Env['AI']): P
 			])) as ToMarkdownResult[];
 			const markdown = results[0]?.data?.trim();
 			if (markdown) {
-				return markdown;
+				return fixMarkdownFormatting(markdown);
 			}
 		} catch (error) {
 			console.error('AI toMarkdown conversion failed:', error);
@@ -158,6 +208,51 @@ const convertEmailToMarkdown = async (email: PostalMime.Email, ai: Env['AI']): P
 };
 
 const chunkForDiscord = (content: string, limit: number): string[] => {
+	const chunks: string[] = [];
+
+	// 画像URLマーカーを抽出して独立したチャンクとして追加
+	const imageMarkerRegex = /::IMAGE_URL::(.+?)::\/IMAGE_URL::/g;
+	let match;
+	let lastIndex = 0;
+
+	// 画像URLを抽出してチャンクに追加
+	while ((match = imageMarkerRegex.exec(content)) !== null) {
+		const [fullMatch, imageUrl] = match;
+		const urlChunk = imageUrl.trim();
+
+		// 画像URLの前のテキストをチャンクに追加
+		if (match.index > lastIndex) {
+			const beforeText = content.slice(lastIndex, match.index);
+			if (beforeText.trim()) {
+				chunks.push(...chunkText(beforeText, limit));
+			}
+		}
+
+		// 画像URLを独立したチャンクとして追加
+		if (urlChunk) {
+			chunks.push(urlChunk);
+		}
+
+		lastIndex = match.index + fullMatch.length;
+	}
+
+	// 残りのテキストをチャンクに追加
+	if (lastIndex < content.length) {
+		const remainingText = content.slice(lastIndex);
+		if (remainingText.trim()) {
+			chunks.push(...chunkText(remainingText, limit));
+		}
+	}
+
+	// 画像URLが含まれていない場合のフォールバック
+	if (chunks.length === 0 && content.trim()) {
+		return chunkText(content, limit);
+	}
+
+	return chunks;
+};
+
+const chunkText = (content: string, limit: number): string[] => {
 	const chunks: string[] = [];
 	let remaining = content;
 
