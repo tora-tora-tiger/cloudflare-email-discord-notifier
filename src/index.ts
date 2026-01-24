@@ -53,6 +53,7 @@ const forwardEmails = async (message: ForwardableEmailMessage, addresses: string
 
 
 const DISCORD_MESSAGE_LIMIT = 2000;
+const DISCORD_SUPPRESS_NOTIFICATIONS_FLAG = 1 << 12;
 
 type ToMarkdownResult = {
 	name: string;
@@ -211,16 +212,21 @@ export const sendDiscordChunks = async (
 	fetchFn: typeof fetch = fetch
 ): Promise<void> => {
 	for (const webhookUrl of webhookUrls) {
+		let sentChunkCount = 0;
 		for (const chunk of chunks) {
 			if (!chunk) {
 				continue;
+			}
+			const payload: { content: string; flags?: number } = { content: chunk };
+			if (sentChunkCount > 0) {
+				payload.flags = DISCORD_SUPPRESS_NOTIFICATIONS_FLAG;
 			}
 			const response = await fetchFn(webhookUrl, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
 				},
-				body: JSON.stringify({ content: chunk }),
+				body: JSON.stringify(payload),
 			});
 
 			if (!response.ok) {
@@ -230,6 +236,7 @@ export const sendDiscordChunks = async (
 				const errorText = await response.text();
 				console.error({ 'Discord API response': errorText });
 			}
+			sentChunkCount += 1;
 		}
 	}
 };

@@ -21,9 +21,25 @@ describe('discord webhook sender', () => {
 			expect(webhooks).toContain(c.url);
 			expect(c.method).toBe('POST');
 			expect(c.headers?.['Content-Type']).toBe('application/json');
-			const parsed = JSON.parse(c.body ?? '{}') as { content?: string };
+			const parsed = JSON.parse(c.body ?? '{}') as { content?: string; flags?: number };
 			expect(['a', 'b']).toContain(parsed.content);
+		}
+
+		const callsByWebhook = new Map<string, { content?: string; flags?: number }[]>();
+		for (const c of calls) {
+			const parsed = JSON.parse(c.body ?? '{}') as { content?: string; flags?: number };
+			const bucket = callsByWebhook.get(c.url) ?? [];
+			bucket.push(parsed);
+			callsByWebhook.set(c.url, bucket);
+		}
+
+		for (const webhook of webhooks) {
+			const items = callsByWebhook.get(webhook) ?? [];
+			expect(items).toHaveLength(2);
+			expect(items[0]?.content).toBe('a');
+			expect(items[0]?.flags).toBeUndefined();
+			expect(items[1]?.content).toBe('b');
+			expect(items[1]?.flags).toBe(4096);
 		}
 	});
 });
-
