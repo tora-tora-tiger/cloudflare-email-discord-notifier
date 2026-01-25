@@ -53,6 +53,7 @@ const forwardEmails = async (message: ForwardableEmailMessage, addresses: string
 
 
 const DISCORD_MESSAGE_LIMIT = 2000;
+const DISCORD_SUPPRESS_NOTIFICATIONS_FLAG = 1 << 12;
 
 type ToMarkdownResult = {
 	name: string;
@@ -93,28 +94,7 @@ const sendDiscordNotification = async (
 	const fullMessage = `${headerLines.join('\n')}\n\n${markdownBody}`.trim();
 	const chunks = chunkForDiscord(fullMessage, DISCORD_MESSAGE_LIMIT);
 
-	for (const webhookUrl of webhookUrls) {
-		for (const chunk of chunks) {
-			if (!chunk) {
-				continue;
-			}
-			const response = await fetch(webhookUrl, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({ content: chunk }),
-			});
-
-			if (!response.ok) {
-				console.error(
-					`Failed to send Discord notification to ${webhookUrl}: ${response.status} ${response.statusText}`
-				);
-				const errorText = await response.text();
-				console.error({ 'Discord API response': errorText });
-			}
-		}
-	}
+	await sendDiscordChunks(chunks, webhookUrls);
 };
 
 const formatAddresses = (addresses: PostalMime.Address[] | undefined): string => {
@@ -132,11 +112,141 @@ const formatSingleAddress = (address: PostalMime.Address | undefined): string =>
 	return `${displayName}<${address.address}>`;
 };
 
+type UrlRange = { start: number; end: number };
+
+const stripUrlNewlines = (url: string): string => url.replace(/\r?\n+/g, '');
+
+const isUrlLike = (s: string): boolean => /^(https?:\/\/|https?:%2F%2F|www\.)/i.test(s);
+
+const findUrlRanges = (text: string): UrlRange[] => {
+	const ranges: UrlRange[] = [];
+	// "https://..." と "https:%2F%2F..." の両方をURL扱いして、途中分割を防ぐ
+	const urlRegex = /(?:https?:\/\/|https?:%2F%2F)[^\s<>"']+/gi;
+	let m: RegExpExecArray | null;
+	while ((m = urlRegex.exec(text)) !== null) {
+		const urlStart = m.index;
+		let urlEnd = m.index + m[0].length;
+
+		// 末尾の一般的な句読点を落とす
+		while (urlEnd > urlStart && /[),.\]]/.test(text[urlEnd - 1])) {
+			urlEnd -= 1;
+		}
+
+		if (urlEnd > urlStart) {
+			// 直前の "](...)" / "(...)" を保護して、区切り位置が "](" などに当たらないようにする
+			let start = urlStart;
+			let end = urlEnd;
+
+			if (start >= 2 && text.slice(start - 2, start) === '](') {
+				start -= 2;
+			} else if (start >= 1 && text[start - 1] === '(') {
+				start -= 1;
+			}
+
+			// URL直後の ")" も保護（markdownリンクの閉じ括弧）
+			if (end < text.length && text[end] === ')') {
+				end += 1;
+			}
+
+			ranges.push({ start, end });
+		}
+	}
+	return ranges;
+};
+
+const isIndexInsideRanges = (i: number, ranges: UrlRange[]): UrlRange | null => {
+	for (const r of ranges) {
+		if (r.start < i && i < r.end) {
+			return r;
+		}
+	}
+	return null;
+};
+
+const normalizeBrokenUrlText = (text: string): string => {
+	let out = text;
+
+	// 1) 改行で分断されたURLを連結
+	out = out.replace(
+		/(?:https?:\/\/|https?:%2F%2F)[^\s<>"']+(?:\r?\n+[^\s<>"']+)+/gi,
+		(m) => stripUrlNewlines(m)
+	);
+
+	// 2) URL直前の「!」残骸を削除（例: "!https://..." / "! https://..."）
+	out = out.replace(/!\s*(?=(https?:\/\/|https?:%2F%2F))/g, '');
+
+	// 3) 破損した "]( ... )" を URL テキストへ（直前に "[" が無いケースも含めて拾う）
+	//    例: "\n](https://...)" / " ](\nhttps://... )" / " ](https:%2F%2F...)"
+	out = out.replace(
+		/(^|[\s\r\n、。,:;])\]\(\s*([^\s)]+(?:\r?\n+[^\s)]+)*)\s*\)/gim,
+		(_m, p1, maybeUrl) => {
+			const u = stripUrlNewlines(String(maybeUrl));
+			if (!isUrlLike(u)) {
+				return String(p1) + '](' + maybeUrl + ')';
+			}
+			return `${String(p1)} ${u} `;
+		}
+	);
+
+	// 3.5) まだ残っている " ](https://...)" を確実にURL化（markdownリンク "[text](url)" は壊さない）
+	out = out.replace(
+		/(^|[\s\r\n])\]\(\s*((?:https?:\/\/|https?:%2F%2F)[^\s)]+)\s*\)/gim,
+		(_m, p1, url) => `${String(p1)} ${stripUrlNewlines(String(url))} `
+	);
+
+	// 4) "](url" のように閉じ括弧が欠けた残骸もURLとして救出（行末に残ったケースのみ）
+	out = out.replace(
+		/\]\(\s*((?:https?:\/\/|https?:%2F%2F)[^\s)]+)\s*$/gim,
+		(_m, url) => ` ${stripUrlNewlines(String(url))} `
+	);
+
+	// 5) 行末に残った "](" を削除（URLが次チャンク等に逃げて残骸だけ残るケース）
+	out = out.replace(/\]\(\s*$/gm, '');
+
+	return out;
+};
+
+export const sendDiscordChunks = async (
+	chunks: string[],
+	webhookUrls: string[],
+	fetchFn: typeof fetch = fetch
+): Promise<void> => {
+	for (const webhookUrl of webhookUrls) {
+		let sentChunkCount = 0;
+		for (const chunk of chunks) {
+			if (!chunk) {
+				continue;
+			}
+			const payload: { content: string; flags?: number } = { content: chunk };
+			if (sentChunkCount > 0) {
+				payload.flags = DISCORD_SUPPRESS_NOTIFICATIONS_FLAG;
+			}
+			const response = await fetchFn(webhookUrl, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify(payload),
+			});
+
+			if (!response.ok) {
+				console.error(
+					`Failed to send Discord notification to ${webhookUrl}: ${response.status} ${response.statusText}`
+				);
+				const errorText = await response.text();
+				console.error({ 'Discord API response': errorText });
+			}
+			sentChunkCount += 1;
+		}
+	}
+};
+
 /**
  * Markdownの書式問題を修正する
  */
-const fixMarkdownFormatting = (markdown: string): string => {
-	let fixed = markdown;
+export const fixMarkdownFormatting = (markdown: string): string => {
+	// 0. URL周りの破損を先に正規化
+	let fixed = normalizeBrokenUrlText(markdown);
 
 	// 1. エスケープされた括弧を修正（最初に処理）
 	fixed = fixed.replace(/\\\[/g, '[');
@@ -152,31 +262,52 @@ const fixMarkdownFormatting = (markdown: string): string => {
 	// 3. 画像リンクをテキストリンクに変換（[![alt](img)](link) → [alt](link)）
 	fixed = fixed.replace(/\[!\[([^\]]*)\]\([^\)]+\)\]\(([^\)]+)\)/g, '[$1]($2)');
 
-	// 4. 画像を削除してURLのみを残す（![alt](url) → url）
-	// 画像URLを特別なマーカーで囲んで、後でチャンク分割できるようにする
-	fixed = fixed.replace(/!\[[^\]]*\]\(([^)]+)\)/g, '\n::IMAGE_URL::$1::/IMAGE_URL::\n');
+	// 4. 空のリンクテキストをURLだけにする（[](url) → url）
+	fixed = fixed.replace(/\[\s*\]\(([^)]+)\)/g, (_m, url) => ` ${stripUrlNewlines(String(url))} `);
 
-	// 4. 連続するリンク・画像の間にスペースを挿入
+	// 5. 画像を削除してURLのみを残す（![alt](url) → url）
+	fixed = fixed.replace(/!\[[^\]]*\]\(([^)]+)\)/g, (_m, url) => `\n${stripUrlNewlines(String(url))}\n`);
+
+	// 6. 連続するリンク・画像の間にスペースを挿入
 	// ](url)の直後に[や!が来ている場合にスペースを挿入
 	fixed = fixed.replace(/(\]\([^)]+\))([![])/g, '$1 $2');
 
-	// 5. リンク・画像の後にテキストがくっついているのを修正
+	// 7. リンク・画像の後にテキストがくっついているのを修正
 	// ](url)の直後に非ASCII文字が来ている場合にスペースを挿入
 	fixed = fixed.replace(/(\]\([^)]+\))([^\x00-\x7F])/g, '$1 $2');
 
-	// 6. テーブル形式のパイプを削除（すべてのテーブル形式を解除）
+	// 8. テーブル形式のパイプを削除（すべてのテーブル形式を解除）
 	// 行頭のパイプを削除
 	fixed = fixed.replace(/^\|[\s]*/gm, '');
 	// 行末のパイプとスペースを削除
 	fixed = fixed.replace(/[\s]*\|$/gm, '');
-	// 区切り線を削除（3文字以上のダッシュのみの行）
-	fixed = fixed.replace(/^[\s]*[\-—]{3,}[\s]*$/gm, '');
 
-	// 7. 空行を削除（空白文字や特殊文字のみの行）
+	// 9. 区切り線を削除（ハイフン連続など）
+	// 例: "-----" / "- -----" / ":---:" / "---|---" 等を削除
+	fixed = fixed.replace(/^[\s]*[-—]{3,}[\s]*$/gm, '');
+	fixed = fixed.replace(/^[\s]*-\s*[-—]{3,}[\s]*$/gm, '');
+	fixed = fixed.replace(/^[\s:]*[-—]{3,}([\s:]+[-—:]{3,})+[\s:]*$/gm, '');
+
+	// 9.5 URL/括弧の破損をもう一度回収（後段の置換で残るケース対策）
+	fixed = normalizeBrokenUrlText(fixed);
+
+	// 10. URL以外の「!」だけの残骸を削除
+	fixed = fixed.replace(/^\s*!\s*$/gm, '');
+	fixed = fixed.replace(/!\[\s*$/gm, '');
+
+	// 11. 角括弧/丸括弧だけの残骸を削除
+	fixed = fixed.replace(/(^|[\s\r\n])\[(?=[\s\r\n]|$)/g, '$1');
+	fixed = fixed.replace(/(^|[\s\r\n])\](?=[\s\r\n]|$)/g, '$1');
+	fixed = fixed.replace(/(^|[\s\r\n])\)(?=[\s\r\n]|$)/g, '$1');
+
+	// 12. 行末の "](" を最終掃除（破損リンク残骸）
+	fixed = fixed.replace(/\]\(\s*$/gm, '');
+
+	// 13. 空行を削除（空白文字や特殊文字のみの行）
 	// ͏ (U+034F) と ­ (U+00AD) とスペースのみで構成される行を削除
 	fixed = fixed.replace(/^[\s\u034F\u00AD]*$/gm, '');
 
-	// 8. HTMLタグを削除（DOCTYPE宣言など）
+	// 14. HTMLタグを削除（DOCTYPE宣言など）
 	fixed = fixed.replace(/<[^>]+>/g, '');
 
 	return fixed.trim();
@@ -207,67 +338,60 @@ const convertEmailToMarkdown = async (email: PostalMime.Email, ai: Env['AI']): P
 	return '(本文なし)';
 };
 
-const chunkForDiscord = (content: string, limit: number): string[] => {
-	const chunks: string[] = [];
-
-	// 画像URLマーカーを抽出して独立したチャンクとして追加
-	const imageMarkerRegex = /::IMAGE_URL::(.+?)::\/IMAGE_URL::/g;
-	let match;
-	let lastIndex = 0;
-
-	// 画像URLを抽出してチャンクに追加
-	while ((match = imageMarkerRegex.exec(content)) !== null) {
-		const [fullMatch, imageUrl] = match;
-		const urlChunk = imageUrl.trim();
-
-		// 画像URLの前のテキストをチャンクに追加
-		if (match.index > lastIndex) {
-			const beforeText = content.slice(lastIndex, match.index);
-			if (beforeText.trim()) {
-				chunks.push(...chunkText(beforeText, limit));
-			}
-		}
-
-		// 画像URLを独立したチャンクとして追加
-		if (urlChunk) {
-			chunks.push(urlChunk);
-		}
-
-		lastIndex = match.index + fullMatch.length;
-	}
-
-	// 残りのテキストをチャンクに追加
-	if (lastIndex < content.length) {
-		const remainingText = content.slice(lastIndex);
-		if (remainingText.trim()) {
-			chunks.push(...chunkText(remainingText, limit));
-		}
-	}
-
-	// 画像URLが含まれていない場合のフォールバック
-	if (chunks.length === 0 && content.trim()) {
-		return chunkText(content, limit);
-	}
-
-	return chunks;
-};
+export const chunkForDiscord = (content: string, limit: number): string[] => chunkText(content, limit);
 
 const chunkText = (content: string, limit: number): string[] => {
 	const chunks: string[] = [];
 	let remaining = content;
 
 	while (remaining.length > limit) {
+		const urlRanges = findUrlRanges(remaining);
+
 		let splitIndex = remaining.lastIndexOf('\n', limit);
+		if (splitIndex <= 0) {
+			splitIndex = remaining.lastIndexOf(' ', limit);
+		}
 		if (splitIndex <= 0) {
 			splitIndex = limit;
 		}
-		const chunk = remaining.slice(0, splitIndex).trimEnd();
-		chunks.push(chunk);
+
+		// split位置がURLの途中なら、URL手前に戻す
+		const inside = isIndexInsideRanges(splitIndex, urlRanges);
+		if (inside) {
+			let protectedStart = inside.start;
+
+			// 可能なら markdownリンクの "[" まで戻して、括弧残骸を作らない
+			const lookbehindStart = Math.max(0, protectedStart - 300);
+			const before = remaining.slice(lookbehindStart, protectedStart);
+			const lastNewline = before.lastIndexOf('\n');
+			const lastBracket = before.lastIndexOf('[');
+			if (lastBracket !== -1 && lastBracket > lastNewline) {
+				protectedStart = lookbehindStart + lastBracket;
+			}
+
+			if (protectedStart > 0) {
+				splitIndex = protectedStart;
+			}
+		}
+
+		if (splitIndex <= 0) {
+			splitIndex = limit;
+		}
+
+		let chunkRaw = remaining.slice(0, splitIndex);
+		chunkRaw = chunkRaw.replace(/\]\(\s*$/g, '');
+		const chunk = chunkRaw.trimEnd();
+		if (chunk) {
+			chunks.push(chunk);
+		}
 		remaining = remaining.slice(splitIndex).trimStart();
 	}
 
 	if (remaining.length > 0) {
-		chunks.push(remaining);
+		const cleaned = remaining.replace(/\]\(\s*$/g, '');
+		if (cleaned.length > 0) {
+			chunks.push(cleaned);
+		}
 	}
 
 	return chunks;
