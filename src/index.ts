@@ -330,6 +330,68 @@ export const rewriteImageLinksForDiscord = (
   return out
 }
 
+const removeUnmatchedOpenBrackets = (s: string): string => {
+  const urlRanges = findUrlRanges(s)
+  const opens: number[] = []
+  const remove = new Set<number>()
+
+  let i = 0
+  let inFence = false
+  let inInline = false
+
+  const isEscaped = (idx: number): boolean => idx > 0 && s[idx - 1] === "\\"
+
+  while (i < s.length) {
+    // code fence ``` ... ```
+    if (!inInline && s.startsWith("```", i)) {
+      inFence = !inFence
+      i += 3
+      continue
+    }
+
+    const ch = s[i]
+
+    // inline code `...`
+    if (!inFence && ch === "`") {
+      inInline = !inInline
+      i += 1
+      continue
+    }
+
+    if (!inFence && !inInline) {
+      const inUrl = isIndexInsideRanges(i, urlRanges) !== null
+      if (!inUrl && !isEscaped(i)) {
+        if (ch === "[") {
+          opens.push(i)
+        } else if (ch === "]") {
+          if (opens.length > 0) {
+            opens.pop()
+          }
+        }
+      }
+    }
+
+    i += 1
+  }
+
+  for (const idx of opens) {
+    remove.add(idx)
+  }
+
+  if (remove.size === 0) {
+    return s
+  }
+
+  let out = ""
+  for (let j = 0; j < s.length; j += 1) {
+    if (!remove.has(j)) {
+      out += s[j]
+    }
+  }
+  return out
+}
+
+
 /**
  * Discordに投げる直前の最終整形:
  * - "[[" / "]]" の抑制
@@ -347,6 +409,9 @@ export const finalizeDiscordMarkdown = (markdown: string): string => {
 
   // 空行が増えすぎたら2行までに抑える
   out = out.replace(/\n{3,}/g, "\n\n")
+
+	// ここを追加：対になっていない "[" だけを除去
+  out = removeUnmatchedOpenBrackets(out)
 
   return out.trim()
 }
