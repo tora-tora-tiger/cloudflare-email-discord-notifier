@@ -6,7 +6,7 @@ Cloudflare Workersを使ったメール転送とDiscord通知を行うプロジ�
 
 - 受信メールの転送
 - Discordへの通知送信
-- メールのパースと整形
+- メールのパースと整形(Turndown.js使用)
 
 ## セットアップ
 
