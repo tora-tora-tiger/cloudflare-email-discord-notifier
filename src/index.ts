@@ -111,13 +111,19 @@ const findUrlRanges = (text: string): UrlRange[] => {
       let start = urlStart
       let end = urlEnd
 
+      let wrappedByParen = false
+      let wrappedByBracketParen = false
+
       if (start >= 2 && text.slice(start - 2, start) === "](") {
         start -= 2
+        wrappedByBracketParen = true
       } else if (start >= 1 && text[start - 1] === "(") {
         start -= 1
+        wrappedByParen = true
       }
 
-      if (end < text.length && text[end] === ")") {
+      // 末尾の ")" を含めるのは Markdown の "(url)" / "](url)" の場合だけ
+      if ((wrappedByParen || wrappedByBracketParen) && end < text.length && text[end] === ")") {
         end += 1
       }
 
@@ -387,6 +393,62 @@ const removeUnmatchedOpenBrackets = (s: string): string => {
   return out
 }
 
+const removeUnmatchedCloseParens = (s: string): string => {
+  const urlRanges = findUrlRanges(s)
+  const opens: number[] = []
+  const remove = new Set<number>()
+
+  let i = 0
+  let inFence = false
+  let inInline = false
+
+  const isEscaped = (idx: number): boolean => idx > 0 && s[idx - 1] === "\\"
+
+  while (i < s.length) {
+    if (!inInline && s.startsWith("```", i)) {
+      inFence = !inFence
+      i += 3
+      continue
+    }
+
+    const ch = s[i]
+
+    if (!inFence && ch === "`") {
+      inInline = !inInline
+      i += 1
+      continue
+    }
+
+    if (!inFence && !inInline) {
+      const inUrl = isIndexInsideRanges(i, urlRanges) !== null
+      if (!inUrl && !isEscaped(i)) {
+        if (ch === "(") {
+          opens.push(i)
+        } else if (ch === ")") {
+          if (opens.length > 0) {
+            opens.pop()
+          } else {
+            remove.add(i)
+          }
+        }
+      }
+    }
+
+    i += 1
+  }
+
+  if (remove.size === 0) {
+    return s
+  }
+
+  let out = ""
+  for (let j = 0; j < s.length; j += 1) {
+    if (!remove.has(j)) {
+      out += s[j]
+    }
+  }
+  return out
+}
 
 /**
  * Discordに投げる直前の最終整形:
@@ -408,6 +470,8 @@ export const finalizeDiscordMarkdown = (markdown: string): string => {
 
 	// ここを追加：対になっていない "[" だけを除去
   out = removeUnmatchedOpenBrackets(out)
+  // 対になっていない ")" だけを除去
+  out = removeUnmatchedCloseParens(out)
 
   return out.trim()
 }
