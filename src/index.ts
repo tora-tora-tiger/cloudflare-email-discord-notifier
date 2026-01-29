@@ -252,6 +252,105 @@ export const fixMarkdownFormatting = (markdown: string): string => {
   return fixed.trim()
 }
 
+type ImgLinkRewriteOptions = {
+  addBlankLineBetween: boolean
+}
+
+const squashDoubleBrackets = (s: string): string => {
+  let out = s
+  // Discordで崩れて "[[" / "]]" になるケースを単純化
+  while (out.includes("[[")) {
+    out = out.replace(/\[\[/g, "[")
+  }
+  while (out.includes("]]")) {
+    out = out.replace(/\]\]/g, "]")
+  }
+  return out
+}
+
+const ensureLinkSeparation = (s: string): string => {
+  let out = s
+
+  // Markdownリンクの直後に次のリンク/画像がくっつくのを分離
+  // 例: "](a)[x](b)" / "](a)![x](b)" / "](a)(b)" のような崩れを避ける
+  out = out.replace(/(\]\([^)]+\))(?=\[)/g, "$1\n")
+  out = out.replace(/(\]\([^)]+\))(?=!)/g, "$1\n")
+
+  // 画像URLや通常URLが連結してしまうケースを最低限分離
+  out = out.replace(/(https?:\/\/[^\s<>"']+)(?=https?:\/\/)/g, "$1\n")
+
+  return out
+}
+
+/**
+ * Discord向け:
+ * [![alt](img)](link) を
+ * [alt](link)\n\nimg
+ * に変換する
+ */
+export const rewriteImageLinksForDiscord = (
+  markdown: string,
+  options: ImgLinkRewriteOptions = { addBlankLineBetween: true }
+): string => {
+  const blank = options.addBlankLineBetween ? "\n\n" : "\n"
+  let out = markdown
+
+  // まずURL内改行を除去（img/link共に）
+  out = out.replace(
+    /\[!\[([^\]]*)\]\(([^)]+)\)\]\(([^)]+)\)/g,
+    (_m, altRaw, imgRaw, linkRaw) => {
+      const alt = String(altRaw || "").trim()
+      const img = stripUrlNewlines(String(imgRaw || "").trim())
+      const link = stripUrlNewlines(String(linkRaw || "").trim())
+
+      // altが空なら、リンクテキストはURLを使う
+      const label = alt.length > 0 ? alt : link
+
+      // 画像URLだけを別行に出す（画像は画像として保持しない方針）
+      // ※Discordで画像展開させたいなら、この行はURL単体が一番強い
+      return `[${label}](${link})${blank}${img}`
+    }
+  )
+
+  // まれに "! [alt](img)" のような崩れ方を拾う（空白入り）
+  out = out.replace(
+    /\[\s*!\[([^\]]*)\]\(\s*([^)]+)\s*\)\s*\]\(\s*([^)]+)\s*\)/g,
+    (_m, altRaw, imgRaw, linkRaw) => {
+      const alt = String(altRaw || "").trim()
+      const img = stripUrlNewlines(String(imgRaw || "").trim())
+      const link = stripUrlNewlines(String(linkRaw || "").trim())
+      const label = alt.length > 0 ? alt : link
+      return `[${label}](${link})${blank}${img}`
+    }
+  )
+
+  out = squashDoubleBrackets(out)
+  out = ensureLinkSeparation(out)
+
+  return out
+}
+
+/**
+ * Discordに投げる直前の最終整形:
+ * - "[[" / "]]" の抑制
+ * - リンク同士がくっつくのを抑制
+ * - 画像付きリンクの入れ替え（rewriteImageLinksForDiscord）
+ */
+export const finalizeDiscordMarkdown = (markdown: string): string => {
+  let out = markdown
+
+  out = rewriteImageLinksForDiscord(out, { addBlankLineBetween: true })
+
+  // 追加の括弧残骸を軽く掃除（過剰にはやらない）
+  out = out.replace(/\]\(\s*$/gm, "")
+  out = out.replace(/^\s*!\s*$/gm, "")
+
+  // 空行が増えすぎたら2行までに抑える
+  out = out.replace(/\n{3,}/g, "\n\n")
+
+  return out.trim()
+}
+
 const escapeHtml = (s: string): string => {
   return s
     .replace(/&/g, "&amp;")
@@ -401,12 +500,16 @@ const convertEmailToMarkdown = (email: PostalMime.Email): string => {
   const text = email.text
 
   if (html && html.trim().length > 0) {
-    return fixMarkdownFormatting(htmlToMarkdown(html))
+    const md = htmlToMarkdown(html)
+    const formatted = fixMarkdownFormatting(md)
+    return finalizeDiscordMarkdown(formatted)
   }
 
   if (text && text.trim().length > 0) {
     const pseudoHtml = textToHtml(text)
-    return fixMarkdownFormatting(htmlToMarkdown(pseudoHtml))
+    const md = htmlToMarkdown(pseudoHtml)
+    const formatted = fixMarkdownFormatting(md)
+    return finalizeDiscordMarkdown(formatted)
   }
 
   return "(本文なし)"
