@@ -55,6 +55,12 @@ const sendDiscordNotification = async (
   const rawEmail = new Response(message.raw)
   const email = await parser.parse(await rawEmail.arrayBuffer())
 
+	console.log("parsed keys", Object.keys(email))
+	console.log("has html", Boolean(email.html), "html len", email.html?.length ?? 0)
+	console.log("has text", Boolean(email.text), "text len", email.text?.length ?? 0)
+	console.log("subject", message.headers.get("subject"))
+
+
   const from = formatSingleAddress(email.from)
   const to = formatAddresses(email.to)
   const cc = formatAddresses(email.cc)
@@ -269,7 +275,8 @@ export const htmlToMarkdown = (html: string): string => {
     codeBlockStyle: "fenced"
   })
   const { document } = parseHTML(html)
-  return turndown.turndown(document.body)
+  const root = document.body ?? document
+  return turndown.turndown(root)
 }
 
 /**
