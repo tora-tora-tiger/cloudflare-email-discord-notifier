@@ -44,9 +44,6 @@ const forwardEmails = async (message: ForwardableEmailMessage, addresses: string
 const DISCORD_MESSAGE_LIMIT = 2000
 const DISCORD_SUPPRESS_NOTIFICATIONS_FLAG = 1 << 12
 
-/**
- * メール内容をパースし、DiscordのWebhookに通知を送信する関数
- */
 const sendDiscordNotification = async (
   message: ForwardableEmailMessage,
   webhookUrls: string[]
@@ -55,11 +52,10 @@ const sendDiscordNotification = async (
   const rawEmail = new Response(message.raw)
   const email = await parser.parse(await rawEmail.arrayBuffer())
 
-	console.log("parsed keys", Object.keys(email))
-	console.log("has html", Boolean(email.html), "html len", email.html?.length ?? 0)
-	console.log("has text", Boolean(email.text), "text len", email.text?.length ?? 0)
-	console.log("subject", message.headers.get("subject"))
-
+  console.log("parsed keys", JSON.stringify(Object.keys(email)))
+  console.log("has html", String(Boolean(email.html)), "html len", String(email.html?.length ?? 0))
+  console.log("has text", String(Boolean(email.text)), "text len", String(email.text?.length ?? 0))
+  console.log("subject", message.headers.get("subject") || "")
 
   const from = formatSingleAddress(email.from)
   const to = formatAddresses(email.to)
@@ -180,9 +176,6 @@ const normalizeBrokenUrlText = (text: string): string => {
   return out
 }
 
-/**
- * Discord webhook 送信
- */
 export const sendDiscordChunks = async (
   chunks: string[],
   webhookUrls: string[],
@@ -219,7 +212,7 @@ export const sendDiscordChunks = async (
 }
 
 /**
- * Markdownの書式問題を修正する
+ * Markdown整形（画像は消さない・リンクも保持）
  */
 export const fixMarkdownFormatting = (markdown: string): string => {
   let fixed = normalizeBrokenUrlText(markdown)
@@ -232,18 +225,13 @@ export const fixMarkdownFormatting = (markdown: string): string => {
   fixed = fixed.replace(/(\])\](\()/g, "]$2")
   fixed = fixed.replace(/(\])\)\](\()/g, "]$2")
 
-  fixed = fixed.replace(/\[!\[([^\]]*)\]\([^\)]+\)\]\(([^\)]+)\)/g, "[$1]($2)")
-
+  // 空のリンクテキストのみ url 化（[](url) → url）
   fixed = fixed.replace(/\[\s*\]\(([^)]+)\)/g, (_m, url) => ` ${stripUrlNewlines(String(url))} `)
-
-  fixed = fixed.replace(/!\[[^\]]*\]\(([^)]+)\)/g, (_m, url) => `\n${stripUrlNewlines(String(url))}\n`)
 
   fixed = fixed.replace(/(\]\([^)]+\))([![])/g, "$1 $2")
   fixed = fixed.replace(/(\]\([^)]+\))([^\x00-\x7F])/g, "$1 $2")
 
-  fixed = fixed.replace(/^\|[\s]*/gm, "")
-  fixed = fixed.replace(/[\s]*\|$/gm, "")
-
+  // 区切り線を削除
   fixed = fixed.replace(/^[\s]*[-—]{3,}[\s]*$/gm, "")
   fixed = fixed.replace(/^[\s]*-\s*[-—]{3,}[\s]*$/gm, "")
   fixed = fixed.replace(/^[\s:]*[-—]{3,}([\s:]+[-—:]{3,})+[\s:]*$/gm, "")
@@ -261,38 +249,166 @@ export const fixMarkdownFormatting = (markdown: string): string => {
 
   fixed = fixed.replace(/^[\s\u034F\u00AD]*$/gm, "")
 
-  fixed = fixed.replace(/<[^>]+>/g, "")
-
   return fixed.trim()
 }
 
-/**
- * HTML -> Markdown（turndown + linkedom/worker）
- * Workers には DOM が無いので linkedom で document を作る
- */
-export const htmlToMarkdown = (html: string): string => {
-  const turndown = new TurndownService({
-    codeBlockStyle: "fenced"
-  })
-  const { document } = parseHTML(html)
-  const root = document.body ?? document
-  return turndown.turndown(root)
+const escapeHtml = (s: string): string => {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+}
+
+const textToHtml = (text: string): string => {
+  const escaped = escapeHtml(text)
+  const withBr = escaped.replace(/\r?\n/g, "<br>")
+  return `<div>${withBr}</div>`
+}
+
+const getAttr = (el: any, name: string): string => {
+  const v = el?.getAttribute?.(name)
+  return typeof v === "string" ? v : ""
+}
+
+const pickImgUrl = (img: any): string => {
+  const src = getAttr(img, "src")
+  if (src) {
+    return src
+  }
+  const dataSrc = getAttr(img, "data-src") || getAttr(img, "data-original") || getAttr(img, "data-lazy-src")
+  if (dataSrc) {
+    return dataSrc
+  }
+  const srcset = getAttr(img, "srcset")
+  if (srcset) {
+    const first = srcset.split(",")[0]?.trim() || ""
+    const url = first.split(/\s+/)[0] || ""
+    return url
+  }
+  return ""
 }
 
 /**
- * フォールバック無し:
- * - HTML があれば turndown で Markdown 化し、整形して返す
- * - HTML が無ければ text を返す（整形は不要なのでそのまま）
+ * linkedom の配置差（bodyが空でdocument側に中身がある）を吸収して、
+ * turndown に渡す root を正しく選ぶ
+ */
+const pickRootNodeForTurndown = (document: any): any => {
+  const candidates: any[] = []
+  if (document?.body) {
+    candidates.push(document.body)
+  }
+  if (document?.documentElement) {
+    candidates.push(document.documentElement)
+  }
+  candidates.push(document)
+
+  const score = (node: any): number => {
+    if (!node) {
+      return 0
+    }
+    const textLen = String(node.textContent || "").trim().length
+    const imgCount = node.querySelectorAll ? node.querySelectorAll("img").length : 0
+    const aCount = node.querySelectorAll ? node.querySelectorAll("a").length : 0
+    const childCount = node.childNodes ? node.childNodes.length : 0
+    return textLen * 2 + imgCount * 50 + aCount * 10 + childCount
+  }
+
+  let best = candidates[0]
+  let bestScore = score(best)
+
+  for (const c of candidates.slice(1)) {
+    const s = score(c)
+    if (s > bestScore) {
+      best = c
+      bestScore = s
+    }
+  }
+
+  return best
+}
+
+/**
+ * turndown を Workers で確実に動かす（画像・リンク保持）
+ */
+export const htmlToMarkdown = (html: string): string => {
+  const { document } = parseHTML(html)
+  const root = pickRootNodeForTurndown(document)
+
+  const td = new TurndownService({
+    codeBlockStyle: "fenced",
+    emDelimiter: "*",
+    strongDelimiter: "**",
+    headingStyle: "atx",
+    bulletListMarker: "-"
+  })
+
+  // 余計な要素は落とす（turndownで削除）
+  td.addRule("removeNoise", {
+    filter: ["script", "style", "meta", "link", "noscript", "title", "head"],
+    replacement: () => ""
+  })
+
+  // 画像を必ず保持（data-src/srcsetも拾う）
+  td.addRule("imgKeep", {
+    filter: (node) => {
+      return node.nodeName === "IMG"
+    },
+    replacement: (_content, node: any) => {
+      const url = pickImgUrl(node)
+      if (!url) {
+        return ""
+      }
+      const alt = getAttr(node, "alt") || ""
+      return `![${alt}](${stripUrlNewlines(url)})`
+    }
+  })
+
+  // リンクを必ず保持（空ラベルならURLをラベルにする）
+  td.addRule("aKeep", {
+    filter: (node) => {
+      return node.nodeName === "A"
+    },
+    replacement: (content: string, node: any) => {
+      const href = getAttr(node, "href")
+      const u = stripUrlNewlines(href)
+      const label = content && content.trim().length > 0 ? content.trim() : u
+      if (!u) {
+        return label
+      }
+      return `[${label}](${u})`
+    }
+  })
+
+  const md = td.turndown(root)
+
+  // デバッグログ（必要なら残す）
+  console.log("turndown root", root?.nodeName || "(unknown)")
+  console.log("turndown root text len", String((root?.textContent || "").trim().length))
+  console.log("turndown md len", String(md.length))
+
+  return md
+}
+
+/**
+ * turndown 必須:
+ * - HTMLがあればそれを turndown
+ * - HTMLが無ければ text を HTML 化して turndown
  */
 const convertEmailToMarkdown = (email: PostalMime.Email): string => {
   const html = email.html
-  if (html) {
-    const markdown = htmlToMarkdown(html)
-    return fixMarkdownFormatting(markdown)
+  const text = email.text
+
+  if (html && html.trim().length > 0) {
+    return fixMarkdownFormatting(htmlToMarkdown(html))
   }
-  if (email.text) {
-    return email.text
+
+  if (text && text.trim().length > 0) {
+    const pseudoHtml = textToHtml(text)
+    return fixMarkdownFormatting(htmlToMarkdown(pseudoHtml))
   }
+
   return "(本文なし)"
 }
 
