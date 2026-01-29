@@ -14,7 +14,6 @@ export const parseEnv = (env: string | undefined): string[] => {
 export default {
   async email(message: ForwardableEmailMessage, env, ctx): Promise<void> {
     const recipients = parseEnv(env.RECIPIENTS)
-    console.log({ "Recipients:": recipients })
 
     const discordWebhooks = parseEnv(env.DISCORD_WEBHOOKS)
     console.log({ "Discord Webhooks": discordWebhooks })
@@ -51,11 +50,6 @@ const sendDiscordNotification = async (
   const parser = new PostalMime.default()
   const rawEmail = new Response(message.raw)
   const email = await parser.parse(await rawEmail.arrayBuffer())
-
-  console.log("parsed keys", JSON.stringify(Object.keys(email)))
-  console.log("has html", String(Boolean(email.html)), "html len", String(email.html?.length ?? 0))
-  console.log("has text", String(Boolean(email.text)), "text len", String(email.text?.length ?? 0))
-  console.log("subject", message.headers.get("subject") || "")
 
   const from = formatSingleAddress(email.from)
   const to = formatAddresses(email.to)
@@ -547,14 +541,7 @@ export const htmlToMarkdown = (html: string): string => {
     }
   })
 
-  const md = td.turndown(root)
-
-  // デバッグログ（必要なら残す）
-  console.log("turndown root", root?.nodeName || "(unknown)")
-  console.log("turndown root text len", String((root?.textContent || "").trim().length))
-  console.log("turndown md len", String(md.length))
-
-  return md
+  return td.turndown(root)
 }
 
 /**
