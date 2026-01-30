@@ -1,0 +1,10 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - run: pnpm check
+      glob: "*.{js,ts}"
+      stage_fixed: true
+
+    - run: pnpm typecheck
+      glob: "*.{js,ts}"
+      stage_fixed: true
