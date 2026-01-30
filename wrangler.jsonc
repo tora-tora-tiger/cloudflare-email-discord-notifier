@@ -14,5 +14,9 @@
 		{
 			"name": "EMAIL"
 		}
-	]
+	],
+	"vars": {
+		"RECIPIENTS": "",
+		"DISCORD_WEBHOOKS": ""
+	}
 }
