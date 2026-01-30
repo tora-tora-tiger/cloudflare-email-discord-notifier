@@ -86,7 +86,7 @@ const sendDiscordNotification = async (
 
 	const fullMessage = `${headerLines.join("\n")}\n\n${markdownBody}`.trim();
 	// メールの区切りとして区切り線と空白を追加
-	const messageWithSeparator = `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${fullMessage}`;
+	const messageWithSeparator = `${fullMessage}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 	const chunks = chunkForDiscord(messageWithSeparator, DISCORD_MESSAGE_LIMIT);
 
 	await sendDiscordChunks(chunks, webhookUrls);
