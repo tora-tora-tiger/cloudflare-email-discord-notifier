@@ -19,10 +19,10 @@
 		}
 	},
 	"javascript": {
-    "formatter": {
-      "quoteStyle": "double",
-      "semicolons": "always"
-    }
+		"formatter": {
+			"quoteStyle": "double",
+			"semicolons": "always"
+		}
 	},
 	"assist": {
 		"enabled": true,
@@ -31,5 +31,13 @@
 				"organizeImports": "on"
 			}
 		}
-	}
+	},
+	"overrides": [
+		{
+			"includes": ["worker-configuration.d.ts"],
+			"linter": {
+				"enabled": false
+			}
+		}
+	]
 }
