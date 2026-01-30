@@ -1,4 +1,6 @@
 import { parseHTML } from "linkedom/worker";
+import * as PostalMime from "postal-mime";
+import TurndownService from "turndown";
 
 type HTMLElementWithAttributes = {
 	getAttribute?: (name: string) => string | null;
@@ -12,9 +14,6 @@ type DocumentLike = {
 	body?: HTMLElementWithAttributes | null;
 	documentElement?: HTMLElementWithAttributes | null;
 };
-
-import * as PostalMime from "postal-mime";
-import TurndownService from "turndown";
 
 export const parseEnv = (env: string | undefined): string[] => {
 	if (!env) {
