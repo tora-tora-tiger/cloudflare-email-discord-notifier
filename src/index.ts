@@ -55,11 +55,11 @@ const sendDiscordNotification = async (
   const to = formatAddresses(email.to)
   const cc = formatAddresses(email.cc)
   const bcc = formatAddresses(email.bcc)
-  const subject = message.headers.get("subject")
+  const subject = formatEmailSubject(email)
 
   const markdownBody = convertEmailToMarkdown(email)
   const headerLines = [
-    `件名: ${subject || "No Subject"}`,
+    `件名: ${subject}`,
     `From: ${from}`,
     `To: ${to}`,
     `CC: ${cc}`,
@@ -73,6 +73,8 @@ const sendDiscordNotification = async (
 
   await sendDiscordChunks(chunks, webhookUrls)
 }
+
+const formatEmailSubject = (email: PostalMime.Email): string => email.subject || "No Subject"
 
 const formatAddresses = (addresses: PostalMime.Address[] | undefined): string => {
   if (!addresses || addresses.length === 0) {
